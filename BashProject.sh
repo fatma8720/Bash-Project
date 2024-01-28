@@ -27,6 +27,7 @@ list_databases() {
 }
 
 connect_to_database() {
+    list_databases
     read -p "Enter the database name to connect: " dbname
     if [[ ! -d "databases/$dbname" ]]; then
         echo "Database '$dbname' does not exist. Please enter a valid database name."
@@ -157,6 +158,7 @@ drop_table() {
 
 
 insert_into_table() {
+    list_tables
     read -p "Enter the table name to insert into: " tablename
     if [[ ! -e "$current_db/$tablename.metadata" ]]; then
         echo "Table '$tablename' does not exist. Please enter a valid table name."
@@ -307,9 +309,10 @@ delete_all_data() {
 }
 
 select_from_table() {
-    read -p "Enter the table name: " tablename
+ list_tables
+    read -p "Enter the table name to update: " tablename
     if [[ ! -f "$current_db/$tablename.metadata" ]]; then
-        echo "Table '$tablename' does not exist."
+        echo "Table '$tablename' does not exist. Please enter a valid table name."
         return
     fi
 
@@ -328,8 +331,7 @@ select_from_table() {
             select_all_from_table "$current_db/$tablename"
             ;;
         2)
-            read -p "Enter the primary key value for the row: " row_key
-            select_row_from_table "$current_db/$tablename" "$row_key"
+            select_row_from_table "$current_db/$tablename" "${columns[@]}"
             ;;
         3)
             read -p "Enter the column name to select: " col_name
@@ -355,14 +357,46 @@ select_all_from_table() {
 
 select_row_from_table() {
     local data_file="$1"
-    local row_key="$2"
-    local row_data=$(grep -E "^$row_key:" "$data_file")
-    if [[ -n $row_data ]]; then
-        echo "$row_data"
+    shift
+    local columns=("$@")
+
+    PS3="Select column for filtering: "
+    select col_name in "${columns[@]}"; do
+        if [[ -n $col_name ]]; then
+            break
+        else
+            echo "Invalid option. Please select a valid column."
+        fi
+    done
+
+    read -p "Enter the value for $col_name: " col_value
+    if [[ -z "$col_value" ]]; then
+        echo "Column value cannot be empty. Please enter a valid value."
+        return
+    fi
+
+    local col_index
+
+    for ((i=0; i<${#columns[@]}; i++)); do
+        if [[ "${columns[$i]}" == "$col_name" ]]; then
+            col_index=$((i + 1))  
+            break
+        fi
+    done
+
+    if [[ -n $col_index ]]; then
+        local filtered_rows=$(awk -F':' -v col_index="$col_index" -v col_value="$col_value" '$col_index == col_value' "$data_file")
+        if [[ -n $filtered_rows ]]; then
+            echo "Rows found with $col_name='$col_value':"
+            echo "$filtered_rows"
+        else
+            echo "No rows found with $col_name='$col_value'."
+        fi
     else
-        echo "Row with primary key '$row_key' not found."
+        echo "Column '$col_name' not found in the table."
     fi
 }
+
 
 select_column_from_table() {
     local data_file="$1"
@@ -384,70 +418,57 @@ select_column_from_table() {
 }
 
 update_table() {
+    list_tables
     read -p "Enter the table name to update: " tablename
-    if [[ ! -e "$current_db/$tablename.metadata" ]]; then
+    if [[ ! -e "$current_db/$tablename" ]]; then
         echo "Table '$tablename' does not exist. Please enter a valid table name."
         return
     fi
 
-    metadata="$current_db/$tablename.metadata"
-    IFS=: read -r -a columns <<< "$(head -n 1 "$metadata")"
-    primary_key=${columns[0]}
+    columns=($(head -n 1 "$current_db/$tablename.metadata" | tr ':' ' '))
 
-    read -p "Enter the $primary_key value for the row to update: " primary_key_value
-    if [[ -z "$primary_key_value" ]]; then
-        echo "$primary_key value cannot be empty. Please enter a valid value."
-        return
-    fi
-
-    # Check if the entered primary key value already exists
-    if ! grep -q "^$primary_key_value " "$current_db/$tablename"; then
-        echo "Value '$primary_key_value' not found in '$tablename'. No update done."
-        return
-    fi
-
-    # Ask for a new unique primary key value
-    new_primary_key_value=""
-    while true; do
-        read -p "Enter new $primary_key value: " new_primary_key_value
-
-        # Check if the new primary key value is unique
-        if [[ -z "$new_primary_key_value" ]]; then
-            echo "$primary_key value cannot be empty. Please enter a valid value."
-        elif grep -q "^$new_primary_key_value " "$current_db/$tablename"; then
-            echo "Value '$new_primary_key_value' already exists. Please enter a different $primary_key value."
+    PS3="Select column to update: "
+    select col_name in "${columns[@]}"; do
+        if [[ -n $col_name ]]; then
+            break
         else
+            echo "Invalid option. Please select a valid column."
+        fi
+    done
+
+    read -p "Enter the old value for $col_name: " old_value
+    if [[ -z "$old_value" ]]; then
+        echo "Old value cannot be empty. Please enter a valid value."
+        return
+    fi
+
+    read -p "Enter the new value for $col_name: " new_value
+    if [[ -z "$new_value" ]]; then
+        echo "New value cannot be empty. Please enter a valid value."
+        return
+    fi
+
+    col_index
+
+    for ((i=0; i<${#columns[@]}; i++)); do
+        if [[ "${columns[$i]}" == "$col_name" ]]; then
+            col_index=$((i + 1))  
             break
         fi
     done
+    if [[ -n $col_index ]]; then
+        awk -F':' -v col_index="$col_index" -v old_value="$old_value" -v new_value="$new_value" \
+    'BEGIN {OFS=FS} {if ($col_index == old_value) {$col_index = new_value; print; exit} else print}' "$current_db/$tablename" > "$current_db/$tablename.tmp"
 
-    temp_file=$(mktemp "$current_db/$tablename.XXXXXX")
-    trap 'rm -f "$temp_file"' EXIT
-
-    # Copy all rows to a temporary file, excluding the row with the old primary key value
-    grep -v "^$primary_key_value " "$current_db/$tablename" > "$temp_file"
-
-    # Ask for new values for other columns
-    values=()
-    for col in "${columns[@]}"; do
-        if [[ "$col" == "$primary_key" ]]; then
-            values+=("$new_primary_key_value")
-        else
-            read -p "Enter new value for $col: " new_value
-            values+=("$new_value")
-        fi
-    done
-
-    # Append the row with the new values to the temporary file
-    echo "${values[*]}" >> "$temp_file"
-
-    # Replace the old file with the temporary file
-    mv "$temp_file" "$current_db/$tablename"
-
-    echo "Row with $primary_key='$primary_key_value' updated to $primary_key='$new_primary_key_value' successfully."
+        mv "$current_db/$tablename.tmp" "$current_db/$tablename"
+        echo "Data in column $col_name updated successfully."
+    else
+        echo "Column '$col_name' not found in the table."
+    fi
 }
 
 show_database_menu() {
+clear
     while true; do
         echo "Database Menu:"
         echo "1. Create Table"
@@ -463,24 +484,31 @@ show_database_menu() {
 
         case $choice in
             1)
+                clear
                 create_table
                 ;;
             2)
+                clear
                 list_tables
                 ;;
             3)
+                clear
                 drop_table
                 ;;
             4)
+                clear
                 insert_into_table
                 ;;
             5)
+               clear
                 select_from_table
                 ;;
             6)
+               clear
                 delete_from_table
                 ;;
             7)
+               clear
                 update_table
                 ;;
             8)
@@ -493,8 +521,9 @@ show_database_menu() {
         esac
     done
 }
-
+clear
 while true; do
+
     echo "Main Menu:"
     echo "1. Create Database"
     echo "2. List Databases"
@@ -506,15 +535,19 @@ while true; do
 
     case $choice in
         1)
+            clear
             create_database
             ;;
         2)
+            clear
             list_databases
             ;;
         3)
+            clear
             connect_to_database
             ;;
         4)
+            clear
             drop_database
             ;;
         5)
@@ -526,4 +559,3 @@ while true; do
             ;;
     esac
 done
-
